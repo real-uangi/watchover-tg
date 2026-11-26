@@ -42,4 +42,14 @@ Fx依赖顺序保证数据库初始化后启用业务与HTTP；退出先停止HT
 
 ## 验证与交付边界
 
-只运行类型、单元/必要竞态、vet和编译。模拟RoundTripper/recorder及fake，不运行dev server、真实DB、监听型mock或真实Telegram。fx.ValidateApp验证装配，不Start生产模块。真实Postgres约束/迁移、反向代理、浏览器现场和Telegram联调需另行验收。源码、文档、Dockerfile和只读CI为本地交付，commit/push/release/deploy分别授权。
+只运行类型、单元/必要竞态、vet和编译。模拟RoundTripper/recorder及fake，不运行dev server、真实DB、监听型mock或真实Telegram。fx.ValidateApp验证装配，不Start生产模块。真实Postgres约束/迁移、反向代理、浏览器现场和Telegram联调需另行验收。源码、文档、Dockerfile和CI配置均须按实际执行结果报告，commit/push/release/deploy分别授权。
+
+## 构建与发布
+
+Checks 面向 main/PR，且通过 workflow_call 供 Release 复用，仅有只读权限。正式 Release 由稳定标签 vX.Y.Z 的 push 触发；门禁严格校验标签格式，并验证解引用后的 commit 属于 origin/main 历史。发布不要求标签必须指向 main 顶端，检查和产物都应基于该标签的同一 commit。
+
+GoReleaser OSS 固定 v2.15.2，先构建嵌入的Web，再以CGO_ENABLED=0编译Linux amd64/arm64静态程序。两个架构tar.gz名称保留完整v标签，归档仅含程序和.env.example，另提供SHA256校验清单。运行时密钥和.env不进入发布文件。
+
+原有Dockerfile继续支持从源码构建；Dockerfile.release专供dockers_v2/Buildx包装GoReleaser预编译产物，保持gcr.io/distroless/static-debian12:nonroot运行时，不重复编译、不使用QEMU运行程序探测版本。GHCR目标为ghcr.io/real-uangi/watchover-tg:<tag>与latest，发布Linux双架构manifest。包按public分发，首次发布后单独确认可见性及匿名拉取。latest语义为最近成功镜像发布，不保证最高版本或main最新代码。
+
+Release gate及Checks保持只读；仅publish job使用GITHUB_TOKEN的contents/packages write权限。发布不依赖运行时数据库、管理员口令、Bot Token或主加密密钥。正式Release、归档校验、GHCR公开及匿名拉取的完成状态需由实际CI和产物证据确认，不能从配置文件推定。

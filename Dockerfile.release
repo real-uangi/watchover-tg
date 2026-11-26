@@ -1,0 +1,9 @@
+FROM gcr.io/distroless/static-debian12:nonroot
+
+ARG TARGETPLATFORM
+COPY ${TARGETPLATFORM}/watchover-tg /usr/local/bin/watchover-tg
+
+ENV RUN_MODE=release HTTP_PORT=8080
+USER nonroot:nonroot
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/watchover-tg"]

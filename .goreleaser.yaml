@@ -1,0 +1,66 @@
+version: 2
+
+project_name: watchover-tg
+
+before:
+  hooks:
+    - pnpm --dir web build
+
+builds:
+  - id: watchover-tg
+    main: .
+    binary: watchover-tg
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+
+archives:
+  - id: watchover-tg
+    ids:
+      - watchover-tg
+    formats:
+      - tar.gz
+    name_template: "watchover-tg_{{ .Tag }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - .env.example
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+dockers_v2:
+  - id: watchover-tg
+    ids:
+      - watchover-tg
+    dockerfile: Dockerfile.release
+    images:
+      - ghcr.io/real-uangi/watchover-tg
+    tags:
+      - "{{ .Tag }}"
+      - latest
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    labels:
+      org.opencontainers.image.source: https://github.com/real-uangi/watchover-tg
+      org.opencontainers.image.version: "{{ .Tag }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+    annotations:
+      org.opencontainers.image.source: https://github.com/real-uangi/watchover-tg
+      org.opencontainers.image.version: "{{ .Tag }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+
+release:
+  github:
+    owner: real-uangi
+    name: watchover-tg
+  draft: false
+  prerelease: false

@@ -27,9 +27,20 @@ make build
 
 准备外部 PostgreSQL 数据库和公开 HTTPS 反向代理。复制 `.env.example`，填写数据库连接、公开地址、管理员口令及一个随机 32 字节密钥的标准 Base64 值。加密密钥必须保持稳定并随数据库备份；密钥丢失后无法解密已有配置。生产 `RUN_MODE=release`，避免 allingo 在开发模式额外启用 pprof。
 
-可运行构建后的 `bin/watchover-tg`，或从 Dockerfile 构建镜像。容器只接收必要环境变量，使用非 root 运行。HTTPS 可由反向代理终止，程序内部 HTTP 默认 8080；公网 Webhook 为 `WATCHOVER_PUBLIC_URL/api/v1/telegram/webhook`。数据库初始化在启动阶段执行。
+可运行构建后的 `bin/watchover-tg`，或从原有 `Dockerfile` 构建源码镜像。正式发布另用 `Dockerfile.release` 包装预编译程序。容器使用 Debian 12 distroless 非 root 运行时，只接收必要环境变量。HTTPS 由反向代理终止，程序内部 HTTP 默认 8080；公网 Webhook 为 `WATCHOVER_PUBLIC_URL/api/v1/telegram/webhook`。数据库初始化在启动阶段执行。
 
-后台首次设置顺序：
+正式版本发布成功后，可按以下示例部署。先复制 `.env.example` 为 `.env`，替换其中所有占位值；`DB_DSN` 必须指向容器可访问的外部数据库，不能直接沿用示例的容器内 `127.0.0.1`。下例由同宿主机的 HTTPS 反向代理访问本地 8080 端口：
+
+```sh
+docker pull ghcr.io/real-uangi/watchover-tg:v0.1.0
+docker run -d --name watchover-tg \
+  --restart unless-stopped \
+  --env-file .env \
+  -p 127.0.0.1:8080:8080 \
+  ghcr.io/real-uangi/watchover-tg:v0.1.0
+```
+
+这些是部署命令示例，不会创建数据库。`.env` 不纳入源码、镜像或发布归档。首次启动后按以下顺序完成后台配置：
 
 1. 使用环境中配置的管理员口令登录。
 2. 在“机器人设置”填入 BotFather 创建机器人的 Token，保存后注册 Webhook。后台会保存生成的 Webhook 密钥，重启不需要重新注册。
@@ -75,6 +86,20 @@ make build
 
 官方接口：[Webhook](https://core.telegram.org/bots/api#setwebhook)、[审批邀请](https://core.telegram.org/bots/api#createchatinvitelink)、[媒体下载](https://core.telegram.org/bots/api#getfile)。
 
+## 检查与正式发布
+
+`main` 推送和 PR 只运行 Checks；同一检查工作流也供 Release 通过 `workflow_call` 复用。Checks 使用只读权限，不发布镜像，也不连接运行时数据库或 Telegram。
+
+服务端正式发布由严格的稳定版本标签 `vX.Y.Z` 触发。发布门禁确认标签解引用后的提交属于 `origin/main` 历史，Checks 通过后再发布。GoReleaser OSS 固定 `v2.15.2`：
+
+- 先构建 Web，再以 `CGO_ENABLED=0` 交叉编译 Linux `amd64`、`arm64` 静态程序。
+- GitHub Release 提供带完整 `v` 标签的两个架构归档；归档包含程序及无密钥的 `.env.example`，并提供 SHA256 校验清单。
+- `dockers_v2` 与 Buildx 使用 `Dockerfile.release`，只包装已编译程序，不在发布镜像构建阶段重新编译。原有 `Dockerfile` 保留为源码构建入口。
+- GHCR 目标为公开分发的 `ghcr.io/real-uangi/watchover-tg:<tag>` 与 `:latest`，支持两个架构。`latest` 表示最近一次成功镜像发布，不保证是最高版本或 `main` 最新代码；需要固定版本时使用稳定标签或 digest。
+- 只有 publish job 获得 `GITHUB_TOKEN` 的 `contents: write` 和 `packages: write`，发布不使用管理员口令、Bot Token、数据库连接或主加密密钥。
+
+首次发布需确认 GHCR 包为 public，并实际验证匿名拉取；源码公开不会自动使包公开。创建标签、推送、发布和运行服务是分别授权的动作，修改发布配置本身不会执行它们。
+
 ## 验收状态
 
-本仓库的默认检查属于本地代码/协议验证。真实 PostgreSQL 迁移和约束、反向代理、浏览器现场及 Telegram 权限/收发联调需要在目标环境单独验收。Dockerfile 和 CI 配置不代表镜像已构建、CI 已运行或已部署。
+本仓库的默认检查属于本地代码/协议验证。真实 PostgreSQL 迁移和约束、反向代理、浏览器现场及 Telegram 权限/收发联调需要在目标环境单独验收。Dockerfile 和 CI 配置不代表镜像已构建、CI 已运行或已部署。正式发布结果以对应标签的 Release 工作流、发布附件和匿名镜像验收记录为准。
