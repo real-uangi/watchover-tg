@@ -174,7 +174,10 @@ type Button struct {
 	URL  string `json:"url,omitempty"`
 }
 
-const ReplyTopic = "watchover.bot.reply"
+const (
+	UpdateTopic = "watchover.bot.update"
+	ReplyTopic  = "watchover.bot.reply"
+)
 
 type Reply struct {
 	ChatID  int64
@@ -233,7 +236,10 @@ type Verifier interface {
 	Validate(RequestConfig) error
 	Verify(context.Context, RequestConfig, VerificationInput) (VerificationResult, error)
 }
-type Publisher interface{ Publish(Reply) error }
+type Publisher interface {
+	Publish(Reply) error
+	PublishUpdate(Update) error
+}
 
 type WebhookInfo struct {
 	URL           string `json:"url"`

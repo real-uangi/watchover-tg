@@ -12,12 +12,14 @@ import (
 var Module = fx.Module("bot", fx.Provide(
 	infra.NewBootstrap, infra.NewCipher,
 	infra.NewStore, func(store *infra.Store) domain.Store { return store }, infra.NewTelegram, infra.NewVerifier,
-	newPublisher, newService,
+	fx.Annotate(newPublisher, fx.ParamTags("", `name:"updates"`)), newService,
 ))
 
-type publisher struct{ bus eventbus.EventBus }
+type publisher struct{ bus, updates eventbus.EventBus }
 
-func newPublisher(bus eventbus.EventBus) domain.Publisher { return &publisher{bus: bus} }
+func newPublisher(bus, updates eventbus.EventBus) domain.Publisher {
+	return &publisher{bus: bus, updates: updates}
+}
 func (p *publisher) Publish(r domain.Reply) error {
 	// Copy the keyboard so the queued payload is immutable after Publish.
 	buttons := make([][]domain.Button, len(r.Buttons))
@@ -26,6 +28,12 @@ func (p *publisher) Publish(r domain.Reply) error {
 	}
 	r.Buttons = buttons
 	if err := p.bus.Publish(domain.ReplyTopic, r); err != nil {
+		return domain.ErrUnavailable
+	}
+	return nil
+}
+func (p *publisher) PublishUpdate(update domain.Update) error {
+	if err := p.updates.Publish(domain.UpdateTopic, update); err != nil {
 		return domain.ErrUnavailable
 	}
 	return nil

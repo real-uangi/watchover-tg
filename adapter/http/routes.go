@@ -41,7 +41,7 @@ func Register(engine *gin.Engine, cfg *config.Config, auth *authapp.Service, bot
 		if !readJSONLimit(c, &update, 1<<20) {
 			return
 		}
-		err := bot.HandleUpdate(c.Request.Context(), c.GetHeader("X-Telegram-Bot-Api-Secret-Token"), update)
+		err := bot.ReceiveUpdate(c.Request.Context(), c.GetHeader("X-Telegram-Bot-Api-Secret-Token"), update)
 		reply(c, nil, err)
 	})
 	admin := api.Group("/admin")

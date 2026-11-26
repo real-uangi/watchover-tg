@@ -20,15 +20,17 @@ PostgreSQL持久化单例设置、核验配置与群关联、Telegram用户/群/
 
 每套核验配置含提示、GET/POST URL、headers/query/JSON body、多个JSON Pointer严格标量等值规则（AND）、可选外部ID/展示名路径、关联chatIDs。仅允许http(s)固定scheme/host，用户变量只作用于path/query/header/JSON值；JSON先解析再替换并marshal。变量credential、telegram_user_id、telegram_username；对外HTTP禁redirect、自动重试，错误不可泄露原始URL/请求/响应。
 
-/start展示核验和可加入群；选择配置进入15分钟等待状态，/cancel取消。凭据只在当前请求内存中核验。2xx+合法JSON+全部条件满足才保存grant，业务拒绝与服务故障分开反馈。资格不自动到期。选群同步创建或复用30分钟审批邀请，保存与指定用户、群、配置的映射后才发布提示。chat_join_request重新检查当前资格和映射再approve，错人使用本平台链接则decline，其他管理员邀请不自动处理。
+/start分别发送配置的欢迎文案和核验/可加入群菜单，两条回复不保证先后顺序；欢迎为空时只发菜单，核验成功后不再发送欢迎。选择配置进入15分钟等待状态，/cancel取消。凭据只在入站事件和后台处理内存中核验。2xx+合法JSON+全部条件满足才保存grant，业务拒绝与服务故障分开反馈。资格不自动到期。选群在后台处理中同步创建或复用30分钟审批邀请，保存与指定用户、群、配置的映射后才发布提示。chat_join_request重新检查当前资格和映射再approve，错人使用本平台链接则decline，其他管理员邀请不自动处理。
 
 ## Webhook与副作用
 
 仅POST /api/v1/telegram/webhook，验证secret header。注册max_connections=1，显式订阅message/edited_message/channel_post/edited_channel_post/callback_query/my_chat_member/chat_member/chat_join_request；注册注销均drop_pending_updates=false，退出不注销。
 
-单实例mutex串行执行查收据、同步用例、业务事实与收据同事务提交；同一把锁保护后台配置、资格和用户资料写入，避免撤销/删除与正在核验、审批相互覆盖。已处理update直接200；DB错误5xx；核验网络失败等安全结果作为一次业务处理提交并200，由用户主动再试。禁止仅用last_update_id高水位去重。
+Webhook调用ReceiveUpdate，完成JSON、1MiB大小限制和secret校验后发布解析后的Update；该入口读取设置但不获取业务处理锁。成功入队即返回200，不等待业务事务、核验或Telegram操作。eventbus队列满时最多等待5秒，入队失败返回503。200仅表示内存接收，后续失败不自动重试，退出时未完成的事件可能丢失。
 
-eventbus使用固定订阅者，只发送已提交后的安全提示与群列表/已存邀请。事件不带凭据；提示丢失可用/start或再次点击恢复。发布失败不回滚已提交授权。外部API与DB无法原子提交，不承诺exactly-once；后台发送和成员操作同步执行，不自动重试，超时/连接中断明确为结果未知。
+入站使用Fx命名updates总线，1个dispatcher、1个executor，两级队列各64；固定订阅者使用独立于HTTP请求的60秒context调用HandleUpdate。单实例mutex串行执行查收据、业务用例、业务事实与收据同事务提交；同一把锁保护后台配置、资格和用户资料写入，避免撤销/删除与正在核验、审批相互覆盖。已处理update跳过；后台数据库/处理错误不写完成收据，只记录Update ID和安全错误，不再影响已返回的HTTP响应。核验网络失败等安全业务结果仍作为一次处理提交，由用户主动再试。禁止仅用last_update_id高水位去重。
+
+事务提交后逐条发布Reply到独立的出站eventbus，由两个executor并发处理，单条回复使用10秒context。分开两条总线，避免入站处理发布回复时向同一满队列等待，以及关闭入站时拒绝派生回复。入站事件只带domain.Update，不带HTTP context、secret或Bot Token，可在内存包含用户凭据；出站事件只含安全提示与群列表/已存邀请，不带凭据。原始Update及凭据均不得落库或日志。提示丢失可用/start或再次点击恢复，发布失败不回滚已提交授权。外部API与DB无法原子提交，不承诺exactly-once；后台发送和成员操作同步执行，不自动重试，超时/连接中断明确为结果未知。
 
 ## HTTP、附件与生命周期
 
@@ -38,7 +40,7 @@ eventbus使用固定订阅者，只发送已提交后的安全提示与群列表
 
 环境变量仅DB_DSN、WATCHOVER_PUBLIC_URL、WATCHOVER_ADMIN_PASSWORD、WATCHOVER_ENCRYPTION_KEY及allingo运行参数。默认30天消息保留，后台可改正整数。allingo task配本地KV，每天Asia/Shanghai 03:00读取最新配置并删除过期消息，完成收据固定7天清理。无Redis依赖。
 
-Fx依赖顺序保证数据库初始化后启用业务与HTTP；退出先停止HTTP，再停止任务并取消/等待在途清理、排空eventbus、关闭DB。allingo task无公开Stop API，晚到callback通过门禁拒绝业务执行。eventbus Close超时不取消handler，handler自行使用有界context。
+Fx依赖顺序保证数据库初始化后启用业务与HTTP；退出先停止HTTP，再停止任务并取消/等待在途清理，随后依次关闭并排空入站、出站eventbus，最后关闭DB。allingo task无公开Stop API，晚到callback通过门禁拒绝业务执行。保留Fx默认15秒停机期限，不承诺积压事件全部处理完毕；eventbus Close超时不取消handler，handler自行使用有界context。
 
 ## 验证与交付边界
 

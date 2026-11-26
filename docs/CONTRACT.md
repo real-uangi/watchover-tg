@@ -14,7 +14,7 @@ API 返回 `{code:number,message:string,data:...}`；失败 data=null。认证 c
 - GET /users/list?q=&cursor= -> UserPage（50条）；GET /users/detail?id= -> UserDetail；POST /users/note `{id,note}` -> User；POST /users/revoke `{userId,profileId}`。
 - GET /messages/list?chatId=&cursor= -> MessagePage（50条，时间倒序）；POST /messages/send multipart/form-data，chatId、kind=text|photo|document、text、replyToMessageId（可选），file（媒体必需） -> Message。
 - GET /messages/file?id=消息记录ID -> 认证媒体流。图片预览；其他文件attachment+nosniff。超20MB官方无法下载，返回安全错误。
-- POST /api/v1/telegram/webhook Telegram Update，secret header，成功返回200。
+- POST /api/v1/telegram/webhook Telegram Update，secret header；JSON、大小和secret校验通过且成功进入内存队列后返回200，不等待后台业务处理。入队失败503；队列满时最多等待5秒，后续处理失败不自动重试，退出时未完成的事件可能丢失。
 
 ## 数据类型
 
@@ -46,7 +46,8 @@ Act(ctx,MemberAction)(Member,error)
 Messages(ctx,chatID int64,cursor string)(MessagePage,error)
 Send(ctx,SendMessage)(Message,error)
 Download(ctx,id string)(File,error)
-HandleUpdate(ctx,secret string,Update)error
+ReceiveUpdate(ctx,secret string,Update)error
+HandleUpdate(ctx,Update)error
 DeliverReply(ctx,Reply)error
 Cleanup(ctx)error
 
@@ -55,4 +56,6 @@ Cleanup(ctx)error
 NewStore(manager *db.Manager,cipher *Cipher)*Store 实现 domain.Store；NewCipher(cfg *config.Config)(*Cipher,error)；NewTelegram() domain.Telegram；NewVerifier() domain.Verifier。
 Bootstrap 由infra实现并声明Fx lifecycle：迁移ORM+初始化Settings（欢迎文案、30天、自动生成secret）；DB关闭职责参照posthaste Bootstrap。
 config.Config: Origin string; SecureCookies bool; AdminPassword string; EncryptionKey []byte。
-Publisher由根负责装配，通过eventbus发布domain.Reply，无额外领域事件框架。
+Publisher由根负责装配，提供PublishUpdate(Update)error和Publish(Reply)error。PublishUpdate向Fx命名updates入站总线发布domain.Update（UpdateTopic=watchover.bot.update）；该总线1个dispatcher、1个executor，两级队列各64。ReceiveUpdate读取设置并校验secret，不获取业务处理锁；入站固定订阅者使用独立Background、60秒context调用HandleUpdate，保留业务锁及业务事实/完成收据同事务提交。
+
+Publish继续向默认出站总线发布单条domain.Reply（ReplyTopic=watchover.bot.reply），两个executor、单条10秒context；回复不保证顺序。两总线分别关闭，正常顺序为HTTP、入站、出站、DB，保持Fx默认15秒停机期限。入站载荷不带HTTP context、secret或Bot Token，可在内存包含用户凭据；出站载荷不含凭据。原始Update和凭据不得落库或日志，无额外领域事件框架或持久队列。

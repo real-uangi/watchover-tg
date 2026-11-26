@@ -14,7 +14,7 @@ API 返回 `{code:number,message:string,data:...}`；失败 data=null。认证 c
 - GET /users/list?q=&cursor= -> UserPage（50条）；GET /users/detail?id= -> UserDetail；POST /users/note `{id,note}` -> User；POST /users/revoke `{userId,profileId}`。
 - GET /messages/list?chatId=&cursor= -> MessagePage（50条，时间倒序）；POST /messages/send multipart/form-data，chatId、kind=text|photo|document、text、replyToMessageId（可选），file（媒体必需） -> Message。
 - GET /messages/file?id=消息记录ID -> 认证媒体流。图片预览；其他文件attachment+nosniff。超20MB官方无法下载，返回安全错误。
-- POST /api/v1/telegram/webhook Telegram Update，secret header，成功返回200。
+- POST /api/v1/telegram/webhook Telegram Update，secret header；JSON、大小和secret校验通过且成功进入内存队列后返回200，不等待后台业务处理。
 
 ## 数据类型
 
@@ -23,13 +23,14 @@ API 返回 `{code:number,message:string,data:...}`；失败 data=null。认证 c
 
 ## 状态与安全
 
-- 200：应用操作成功，Webhooks必要业务已持久化；核验测试是否通过由data.passed决定。
+- 200：应用操作成功；Webhook仅表示Update已进入内存队列，不表示业务已处理或持久化。核验测试是否通过由data.passed决定。
 - 400：字段或配置错误；401：管理员会话无效；403：来源、Webhook secret或操作权限不满足；404：资源不存在；409：配置/身份冲突。
 - 413：正文或上传超限；415：JSON媒体类型不符；502：外部操作结果未知；503：外部服务或存储不可用；500：未分类内部故障。502可能附带消息记录，调用方不得自动重发。
 - 响应包含code、message、data、time。HTTP状态与code一致。错误不含原始网络URL、Token或数据库消息。
 - 管理写请求（包括登录）必须带与WATCHOVER_PUBLIC_URL匹配的Origin。所有认证状态和密钥仅在当前页面内存中，不使用localStorage。
 - Cookie watchover_session，Path=/api/v1/admin，HttpOnly，SameSite=Lax，HTTPS Secure，12小时有效。登录后获取的核验请求配置仅用于管理员编辑；Bot Token和Webhook secret不出现在读取响应。
 - webhook需X-Telegram-Bot-Api-Secret-Token，更新上限1MiB。管理JSON正文上限64KiB；上传总正文上限51MiB。
+- Webhook入队失败返回503；队列满时最多等待5秒。入队后后台处理失败不自动重试，退出时未完成的事件可能丢失；凭据与原始Update只在内存流转，不写入日志或数据库。
 - File附件按本地消息记录ID鉴权、检查保留期限后代理，不支持客户端直接传file_id或任意URL。文档强制附件下载；图片预览仅返回安全图片媒体类型。
 
 ## 最小调用示例

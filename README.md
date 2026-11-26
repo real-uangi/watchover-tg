@@ -81,7 +81,7 @@ docker run -d --name watchover-tg \
 - 支持文本、图片、文档及回复；其他媒体显示类型摘要。发送成功表示 Telegram 接口成功，不代表已读。超时显示结果未知，不自动重发，避免重复操作。
 - 图片上传限制 10 MiB、文档 50 MiB，官方文件下载限制 20 MiB；较大文件只展示元数据。文件经后台鉴权代理，浏览器不会获取 Bot Token。
 - 消息默认保存 30 天，可在后台修改；每天北京时间 03:00 使用 allingo task/LocalKV 清理。保留期限删除本平台消息与附件入口，不删除 Telegram 原件。完成收据独立保存 7 天。
-- 核验凭据只存在于本次请求内存，消息记录保留脱敏占位；不保存原始 Update、完整核验请求/响应。事件总线仅发送提交后的提示，提示丢失可重新操作，资格不受影响。
+- Webhook 校验通过并进入内存入站事件总线后即返回 200，后台处理不自动重试，退出时未完成的事件可能丢失。核验凭据只在入站事件与后台处理内存中流转，消息记录保留脱敏占位；不保存原始 Update、完整核验请求/响应。独立出站总线发送提交后的安全提示，提示丢失可重新操作，资格不受影响。
 - Cookie 会话 12 小时有效，退出或重启失效。API no-store，管理写操作检查同源 Origin。
 
 官方接口：[Webhook](https://core.telegram.org/bots/api#setwebhook)、[审批邀请](https://core.telegram.org/bots/api#createchatinvitelink)、[媒体下载](https://core.telegram.org/bots/api#getfile)。

@@ -15,16 +15,24 @@ import (
 
 const sensitiveText = "[核验凭据已隐藏]"
 
-func (s *Service) HandleUpdate(ctx context.Context, secret string, update domain.Update) error {
-	// Telegram会重投请求，且上一个HTTP连接超时后处理仍可能继续；单实例串行查重与提交。
-	s.updates.Lock()
-	defer s.updates.Unlock()
+func (s *Service) ReceiveUpdate(ctx context.Context, secret string, update domain.Update) error {
 	settings, err := s.store.GetSettings(ctx)
 	if err != nil {
 		return err
 	}
 	if settings.WebhookSecret == "" || subtle.ConstantTimeCompare([]byte(secret), []byte(settings.WebhookSecret)) != 1 {
 		return domain.ErrForbidden
+	}
+	return s.publisher.PublishUpdate(update)
+}
+
+func (s *Service) HandleUpdate(ctx context.Context, update domain.Update) error {
+	// 接收端可能重复入队；单实例串行查重、处理并提交完成收据。
+	s.updates.Lock()
+	defer s.updates.Unlock()
+	settings, err := s.store.GetSettings(ctx)
+	if err != nil {
+		return err
 	}
 	done, err := s.store.HasReceipt(ctx, update.ID)
 	if err != nil || done {
@@ -195,7 +203,10 @@ func (s *Service) privateMessage(ctx context.Context, store domain.Store, settin
 		if err := store.DeleteConversation(ctx, input.From.ID); err != nil {
 			return err
 		}
-		return s.menu(ctx, store, settings, input.From.ID, replies)
+		if settings.Welcome != "" {
+			*replies = append(*replies, domain.Reply{ChatID: input.Chat.ID, Text: settings.Welcome})
+		}
+		return s.menu(ctx, store, input.From.ID, replies)
 	case "/cancel":
 		if err := store.DeleteConversation(ctx, input.From.ID); err != nil {
 			return err
@@ -213,7 +224,7 @@ func (s *Service) privateMessage(ctx context.Context, store domain.Store, settin
 	if err != nil {
 		return err
 	}
-	// 在验证流程内输入的文本或附件先永久标为敏感；原始Update及凭据不进入任何事件。
+	// 在验证流程内输入的文本或附件先永久标为敏感；凭据仅存在于内存入站事件与核验调用中。
 	message.Sensitive, message.Text, message.FileID, message.FileName, message.MIMEType, message.FileSize = true, sensitiveText, "", "", "", 0
 	if !conversation.ExpiresAt.After(time.Now()) {
 		if err := store.DeleteConversation(ctx, input.From.ID); err != nil {
@@ -257,10 +268,10 @@ func (s *Service) privateMessage(ctx context.Context, store domain.Store, settin
 		return err
 	}
 	*replies = append(*replies, domain.Reply{ChatID: input.Chat.ID, Text: "验证通过。"})
-	return s.menu(ctx, store, settings, input.From.ID, replies)
+	return s.menu(ctx, store, input.From.ID, replies)
 }
 
-func (s *Service) menu(ctx context.Context, store domain.Store, settings domain.Settings, userID int64, replies *[]domain.Reply) error {
+func (s *Service) menu(ctx context.Context, store domain.Store, userID int64, replies *[]domain.Reply) error {
 	profiles, err := store.Profiles(ctx)
 	if err != nil {
 		return err
@@ -301,9 +312,6 @@ func (s *Service) menu(ctx context.Context, store domain.Store, settings domain.
 		}
 	}
 	text := "请选择验证方式或加入已授权的群组。"
-	if settings.Welcome != "" {
-		text = settings.Welcome + "\n\n" + text
-	}
 	if len(buttons) == 0 {
 		text = "当前没有可用的验证方式或群组，请联系管理员。"
 	}

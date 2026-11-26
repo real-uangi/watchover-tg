@@ -20,10 +20,13 @@ import (
 	"github.com/real-uangi/watchover-tg/internal/shared/config"
 )
 
-type routeStore struct{ domain.Store }
+type routeStore struct {
+	domain.Store
+	settingsErr error
+}
 
-func (*routeStore) GetSettings(context.Context) (domain.Settings, error) {
-	return domain.Settings{BotID: 11, Token: "private-token", WebhookSecret: "webhook-secret", RetentionDays: 30, HasToken: true}, nil
+func (s *routeStore) GetSettings(context.Context) (domain.Settings, error) {
+	return domain.Settings{BotID: 11, Token: "private-token", WebhookSecret: "webhook-secret", RetentionDays: 30, HasToken: true}, s.settingsErr
 }
 func (*routeStore) Message(context.Context, string) (domain.Message, error) {
 	return domain.Message{ID: "record", FileID: "file", FileName: "page.html", Kind: "document", Date: time.Now()}, nil
@@ -36,11 +39,15 @@ func (*routeTelegram) Download(context.Context, string, domain.Message) (domain.
 }
 func routeEngine(t *testing.T) *gin.Engine {
 	t.Helper()
+	bot := application.NewService(&routeStore{}, &routeTelegram{}, nil, nil, "https://watch.example")
+	return routeEngineWithBot(t, bot)
+}
+func routeEngineWithBot(t *testing.T, bot *application.Service) *gin.Engine {
+	t.Helper()
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
 	cfg := &config.Config{Origin: "https://watch.example", SecureCookies: true, AdminPassword: "test-password"}
 	auth := authapp.NewService(authinfra.NewVerifier(cfg), authinfra.NewSessions())
-	bot := application.NewService(&routeStore{}, &routeTelegram{}, nil, nil, cfg.Origin)
 	if err := Register(engine, cfg, auth, bot, fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("<html>management</html>")}}); err != nil {
 		t.Fatal(err)
 	}

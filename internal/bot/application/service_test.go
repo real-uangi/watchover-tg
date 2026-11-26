@@ -202,10 +202,15 @@ func (v *fakeVerifier) Verify(context.Context, domain.RequestConfig, domain.Veri
 
 type fakePublisher struct {
 	replies []domain.Reply
+	updates []domain.Update
 	err     error
 }
 
 func (p *fakePublisher) Publish(r domain.Reply) error { p.replies = append(p.replies, r); return p.err }
+func (p *fakePublisher) PublishUpdate(u domain.Update) error {
+	p.updates = append(p.updates, u)
+	return p.err
+}
 
 type fakeTelegram struct {
 	domain.Telegram
@@ -250,8 +255,118 @@ func credential(id int64, text string) domain.Update {
 }
 func apply(t *testing.T, s *Service, u domain.Update) {
 	t.Helper()
-	if err := s.HandleUpdate(context.Background(), "test-secret", u); err != nil {
+	if err := s.HandleUpdate(context.Background(), u); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestReceiveUpdateQueuesWithoutBusinessLock(t *testing.T) {
+	s, store, v, _, p := fixture()
+	u := credential(1, "/start")
+	s.updates.Lock()
+	defer s.updates.Unlock()
+	done := make(chan error, 1)
+	go func() { done <- s.ReceiveUpdate(context.Background(), "test-secret", u) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("receiving update waited for the business lock")
+	}
+	if len(p.updates) != 1 || p.updates[0].ID != u.ID || p.updates[0].Message.Text != "/start" {
+		t.Fatal("update was not queued")
+	}
+	if len(store.users) != 0 || len(store.messages) != 0 || len(store.receipts) != 0 || len(p.replies) != 0 || v.calls != 0 {
+		t.Fatal("receiving update executed business processing")
+	}
+}
+
+func TestStartPublishesWelcomeAndMenu(t *testing.T) {
+	for _, tc := range []struct {
+		name, welcome string
+		profile       bool
+		enabled       bool
+	}{
+		{name: "available menu", welcome: "配置的欢迎文案", profile: true, enabled: true},
+		{name: "no profiles", welcome: "配置的欢迎文案"},
+		{name: "disabled profile", welcome: "配置的欢迎文案", profile: true},
+		{name: "empty welcome", profile: true, enabled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, store, _, _, p := fixture()
+			store.settings.Welcome = tc.welcome
+			if !tc.profile {
+				clear(store.profiles)
+			} else {
+				profile := store.profiles["profile"]
+				profile.Enabled = tc.enabled
+				store.profiles["profile"] = profile
+			}
+			u := credential(1, "/start")
+			apply(t, s, u)
+			apply(t, s, u)
+			wantCount := 1
+			if tc.welcome != "" {
+				wantCount++
+			}
+			if len(p.replies) != wantCount {
+				t.Fatalf("got %d replies, want %d", len(p.replies), wantCount)
+			}
+			menuText, menuButtons := "当前没有可用的验证方式或群组，请联系管理员。", 0
+			if tc.enabled {
+				menuText, menuButtons = "请选择验证方式或加入已授权的群组。", 1
+			}
+			welcomeSeen, menuSeen := false, false
+			for _, reply := range p.replies {
+				if reply.ChatID != 42 {
+					t.Fatalf("wrong reply destination: %d", reply.ChatID)
+				}
+				switch reply.Text {
+				case tc.welcome:
+					welcomeSeen = true
+					if len(reply.Buttons) != 0 {
+						t.Fatal("welcome contains menu buttons")
+					}
+				case menuText:
+					menuSeen = true
+					if len(reply.Buttons) != menuButtons {
+						t.Fatalf("got %d menu rows, want %d", len(reply.Buttons), menuButtons)
+					}
+				default:
+					t.Fatalf("unexpected reply: %+v", reply)
+				}
+			}
+			if !menuSeen || (tc.welcome != "" && !welcomeSeen) {
+				t.Fatal("welcome or menu missing")
+			}
+		})
+	}
+}
+
+func TestWelcomePublishFailureDoesNotSkipMenu(t *testing.T) {
+	s, store, _, _, p := fixture()
+	store.settings.Welcome = "配置的欢迎文案"
+	p.err = domain.ErrUnavailable
+	apply(t, s, credential(1, "/start"))
+	if len(p.replies) != 2 || len(store.receipts) != 1 {
+		t.Fatal("reply failure skipped another reply or rolled back completion")
+	}
+}
+
+func TestVerificationDoesNotRepeatWelcome(t *testing.T) {
+	s, store, _, _, p := fixture()
+	store.settings.Welcome = "配置的欢迎文案"
+	apply(t, s, callback(1, "v:profile"))
+	apply(t, s, credential(2, "card"))
+	if len(p.replies) != 3 {
+		t.Fatalf("expected verification prompt, success and menu, got %d replies", len(p.replies))
+	}
+	for _, reply := range p.replies {
+		if strings.Contains(reply.Text, store.settings.Welcome) {
+			t.Fatal("verification repeated welcome")
+		}
 	}
 }
 
@@ -314,14 +429,14 @@ func TestVerificationInvitationAndForwardedLink(t *testing.T) {
 }
 
 func TestReceiptFailureRollsBackQualification(t *testing.T) {
-	s, store, v, _, _ := fixture()
+	s, store, v, _, p := fixture()
 	store.conversations[42] = domain.Conversation{UserID: 42, ProfileID: "profile", ExpiresAt: time.Now().Add(time.Minute)}
 	store.receiptErr = errors.New("storage failed")
 	u := credential(7, "card")
-	if err := s.HandleUpdate(context.Background(), "test-secret", u); err == nil {
+	if err := s.HandleUpdate(context.Background(), u); err == nil {
 		t.Fatal("expected storage failure")
 	}
-	if len(store.receipts) != 0 || len(store.messages) != 0 || len(store.grants) != 0 {
+	if len(store.receipts) != 0 || len(store.messages) != 0 || len(store.grants) != 0 || len(p.replies) != 0 {
 		t.Fatal("partial transaction committed")
 	}
 	store.receiptErr = nil
@@ -339,7 +454,7 @@ func TestConcurrentWebhookReplayVerifiesOnce(t *testing.T) {
 	errs := make(chan error, 12)
 	for range 12 {
 		wg.Add(1)
-		go func() { defer wg.Done(); errs <- s.HandleUpdate(context.Background(), "test-secret", u) }()
+		go func() { defer wg.Done(); errs <- s.HandleUpdate(context.Background(), u) }()
 	}
 	wg.Wait()
 	close(errs)
@@ -354,11 +469,11 @@ func TestConcurrentWebhookReplayVerifiesOnce(t *testing.T) {
 }
 
 func TestWrongWebhookSecretHasNoSideEffects(t *testing.T) {
-	s, store, _, _, _ := fixture()
-	if err := s.HandleUpdate(context.Background(), "wrong", credential(9, "card")); !errors.Is(err, domain.ErrForbidden) {
+	s, store, _, _, p := fixture()
+	if err := s.ReceiveUpdate(context.Background(), "wrong", credential(9, "card")); !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("got %v", err)
 	}
-	if len(store.users) != 0 || len(store.messages) != 0 || len(store.receipts) != 0 {
+	if len(store.users) != 0 || len(store.messages) != 0 || len(store.receipts) != 0 || len(p.updates) != 0 {
 		t.Fatal("unauthenticated update persisted")
 	}
 }
@@ -511,7 +626,7 @@ func TestRevocationWaitsForInFlightVerification(t *testing.T) {
 	defer cancel()
 	verified := make(chan error, 1)
 	revoked := make(chan error, 1)
-	go func() { verified <- s.HandleUpdate(ctx, "test-secret", credential(2, "key")) }()
+	go func() { verified <- s.HandleUpdate(ctx, credential(2, "key")) }()
 	select {
 	case <-v.started:
 	case <-ctx.Done():
