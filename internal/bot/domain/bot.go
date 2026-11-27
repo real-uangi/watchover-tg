@@ -283,6 +283,7 @@ type TelegramChat struct {
 type TelegramMember struct {
 	User        TelegramUser `json:"user"`
 	Status      string       `json:"status"`
+	IsMember    bool         `json:"is_member"`
 	UntilDate   int64        `json:"until_date"`
 	CanInvite   bool         `json:"can_invite_users"`
 	CanRestrict bool         `json:"can_restrict_members"`

@@ -206,7 +206,7 @@ func (s *Service) privateMessage(ctx context.Context, store domain.Store, settin
 		if settings.Welcome != "" {
 			*replies = append(*replies, domain.Reply{ChatID: input.Chat.ID, Text: settings.Welcome})
 		}
-		return s.menu(ctx, store, input.From.ID, replies)
+		return s.menu(ctx, store, settings, input.From.ID, replies)
 	case "/cancel":
 		if err := store.DeleteConversation(ctx, input.From.ID); err != nil {
 			return err
@@ -268,10 +268,10 @@ func (s *Service) privateMessage(ctx context.Context, store domain.Store, settin
 		return err
 	}
 	*replies = append(*replies, domain.Reply{ChatID: input.Chat.ID, Text: "验证通过。"})
-	return s.menu(ctx, store, input.From.ID, replies)
+	return s.menu(ctx, store, settings, input.From.ID, replies)
 }
 
-func (s *Service) menu(ctx context.Context, store domain.Store, userID int64, replies *[]domain.Reply) error {
+func (s *Service) menu(ctx context.Context, store domain.Store, settings domain.Settings, userID int64, replies *[]domain.Reply) error {
 	profiles, err := store.Profiles(ctx)
 	if err != nil {
 		return err
@@ -286,20 +286,23 @@ func (s *Service) menu(ctx context.Context, store domain.Store, userID int64, re
 			active[grant.ProfileID] = true
 		}
 	}
+	memberCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
 	buttons := make([][]domain.Button, 0)
-	shown := make(map[int64]bool)
+	checked := make(map[int64]bool)
 	for _, profile := range profiles {
 		if !profile.Enabled {
 			continue
 		}
-		buttons = append(buttons, []domain.Button{{Text: "验证：" + profile.Name, Data: "v:" + profile.ID}})
 		if !active[profile.ID] {
+			buttons = append(buttons, []domain.Button{{Text: "验证：" + profile.Name, Data: "v:" + profile.ID}})
 			continue
 		}
 		for _, id := range profile.ChatIDs {
-			if shown[id] {
+			if checked[id] {
 				continue
 			}
+			checked[id] = true
 			chat, err := store.Chat(ctx, id)
 			if err != nil {
 				return err
@@ -307,13 +310,27 @@ func (s *Service) menu(ctx context.Context, store domain.Store, userID int64, re
 			if !chat.Enabled || chat.BotStatus != "administrator" || !chat.CanInvite {
 				continue
 			}
+			if memberCtx.Err() == nil {
+				member, err := s.tg.Member(memberCtx, settings.Token, id, userID)
+				if err != nil {
+					slog.Warn("bot menu membership lookup failed", "chat_id", id)
+				} else {
+					switch member.Status {
+					case "member", "administrator", "creator":
+						continue
+					case "restricted":
+						if member.IsMember {
+							continue
+						}
+					}
+				}
+			}
 			buttons = append(buttons, []domain.Button{{Text: "加入：" + chat.Title, Data: "g:" + profile.ID + ":" + strconv.FormatInt(id, 10)}})
-			shown[id] = true
 		}
 	}
 	text := "请选择验证方式或加入已授权的群组。"
 	if len(buttons) == 0 {
-		text = "当前没有可用的验证方式或群组，请联系管理员。"
+		text = "当前没有待完成的验证或可加入的群组。"
 	}
 	*replies = append(*replies, domain.Reply{ChatID: userID, Text: text, Buttons: buttons})
 	return nil

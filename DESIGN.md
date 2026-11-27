@@ -24,6 +24,8 @@ PostgreSQL持久化单例设置、核验配置与群关联、Telegram用户/群/
 
 /start分别发送配置的欢迎文案和核验/可加入群菜单，两条回复不保证先后顺序；欢迎为空时只发菜单，核验成功后不再发送欢迎。选择配置进入15分钟等待状态，/cancel取消。凭据只在入站事件和后台处理内存中核验。2xx+合法JSON+全部条件满足才保存grant，业务拒绝与服务故障分开反馈。资格不自动到期。选群在后台处理中同步创建或复用30分钟审批邀请，保存与指定用户、群、配置的映射后才发布提示。chat_join_request重新检查当前资格和映射再approve，错人使用本平台链接则decline，其他管理员邀请不自动处理。
 
+新生成的菜单隐藏有效资格对应的验证项，资格撤销后恢复显示。仅对已授权且当前可邀请的群实时调用getChatMember，每次菜单同群最多查询一次；member、administrator、creator及is_member=true的restricted用户不再显示加入项。全部成员查询共用10秒子context，查询失败或预算耗尽时保留加入项，不向用户提示、不自动重试；失败仅记录安全日志，不因查询失败回滚验证资格。数据库操作继续使用原context。查询结果仅用于本次菜单，不写成员表、不定时刷新、不修改历史菜单。无按钮时显示“当前没有待完成的验证或可加入的群组。”。
+
 ## Webhook与副作用
 
 仅POST /api/v1/telegram/webhook，验证secret header。注册max_connections=1，显式订阅message/edited_message/channel_post/edited_channel_post/callback_query/my_chat_member/chat_member/chat_join_request；注册注销均drop_pending_updates=false，退出不注销。

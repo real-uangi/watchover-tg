@@ -113,6 +113,40 @@ func TestTelegramWebhookAndKickPayload(t *testing.T) {
 		t.Fatal("kick must use one call")
 	}
 }
+func TestTelegramMemberRequestAndRestrictedMembership(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		isMember   bool
+	}{
+		{name: "restricted member", body: `{"ok":true,"result":{"user":{"id":42},"status":"restricted","is_member":true}}`, isMember: true},
+		{name: "restricted nonmember", body: `{"ok":true,"result":{"user":{"id":42},"status":"restricted","is_member":false}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			tg := &Telegram{client: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				calls++
+				if r.Method != http.MethodPost || r.URL.Scheme != "https" || r.URL.Host != "api.telegram.org" || r.URL.Path != "/bot123:key/getChatMember" {
+					t.Fatal("wrong member request target")
+				}
+				var payload struct {
+					ChatID int64 `json:"chat_id"`
+					UserID int64 `json:"user_id"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					t.Fatal(err)
+				}
+				if payload.ChatID != -100 || payload.UserID != 42 {
+					t.Fatalf("wrong member request payload: %+v", payload)
+				}
+				return response(tc.body), nil
+			})}}
+			member, err := tg.Member(context.Background(), "123:key", -100, 42)
+			if err != nil || calls != 1 || member.User.ID != 42 || member.Status != "restricted" || member.IsMember != tc.isMember {
+				t.Fatalf("member=%+v error=%v calls=%d", member, err, calls)
+			}
+		})
+	}
+}
 func TestTelegramNetworkAmbiguityAndNoRetry(t *testing.T) {
 	calls := 0
 	tg := &Telegram{client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {

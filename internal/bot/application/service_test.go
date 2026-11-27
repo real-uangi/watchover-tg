@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/real-uangi/watchover-tg/internal/bot/domain"
@@ -256,6 +257,8 @@ type fakeTelegram struct {
 	me          domain.TelegramUser
 	acts        int
 	member      domain.TelegramMember
+	memberCalls [][2]int64
+	memberFunc  func(context.Context, string, int64, int64) (domain.TelegramMember, error)
 }
 
 func (f *fakeTelegram) Me(context.Context, string) (domain.TelegramUser, error) { return f.me, nil }
@@ -272,7 +275,11 @@ func (f *fakeTelegram) Send(context.Context, string, domain.SendMessage) (domain
 	return f.sendResult, f.sendErr
 }
 func (f *fakeTelegram) Act(context.Context, string, domain.MemberAction) error { f.acts++; return nil }
-func (f *fakeTelegram) Member(context.Context, string, int64, int64) (domain.TelegramMember, error) {
+func (f *fakeTelegram) Member(ctx context.Context, token string, chatID, userID int64) (domain.TelegramMember, error) {
+	f.memberCalls = append(f.memberCalls, [2]int64{chatID, userID})
+	if f.memberFunc != nil {
+		return f.memberFunc(ctx, token, chatID, userID)
+	}
 	return f.member, nil
 }
 
@@ -349,7 +356,7 @@ func TestStartPublishesWelcomeAndMenu(t *testing.T) {
 			if len(p.replies) != wantCount {
 				t.Fatalf("got %d replies, want %d", len(p.replies), wantCount)
 			}
-			menuText, menuButtons := "当前没有可用的验证方式或群组，请联系管理员。", 0
+			menuText, menuButtons := "当前没有待完成的验证或可加入的群组。", 0
 			if tc.enabled {
 				menuText, menuButtons = "请选择验证方式或加入已授权的群组。", 1
 			}
@@ -378,6 +385,238 @@ func TestStartPublishesWelcomeAndMenu(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMenuVerificationOptionsReflectGrants(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		grant     bool
+		active    bool
+		firstData string
+	}{
+		{name: "not verified", firstData: "v:profile"},
+		{name: "revoked", grant: true, firstData: "v:profile"},
+		{name: "verified", grant: true, active: true, firstData: "g:profile:-100"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, store, _, tg, p := fixture()
+			store.profiles["other"] = domain.Profile{ID: "other", Name: "其他验证", Enabled: true}
+			if tc.grant {
+				store.grants[42] = map[string]domain.Grant{"profile": {UserID: 42, ProfileID: "profile", Active: tc.active}}
+			}
+			tg.member.Status = "left"
+			apply(t, s, credential(1, "/start"))
+			if len(p.replies) != 1 || len(p.replies[0].Buttons) != 2 {
+				t.Fatalf("unexpected menu: %+v", p.replies)
+			}
+			shown := map[string]bool{}
+			for _, row := range p.replies[0].Buttons {
+				shown[row[0].Data] = true
+			}
+			if !shown[tc.firstData] || !shown["v:other"] {
+				t.Fatalf("one grant affected another verification: %+v", p.replies)
+			}
+			wantCalls := 0
+			if tc.active {
+				wantCalls = 1
+			}
+			if len(tg.memberCalls) != wantCalls {
+				t.Fatalf("got %d membership queries, want %d", len(tg.memberCalls), wantCalls)
+			}
+		})
+	}
+}
+
+func TestMenuFiltersCurrentMembership(t *testing.T) {
+	for _, tc := range []struct {
+		name, status string
+		isMember     bool
+		showJoin     bool
+	}{
+		{name: "member", status: "member"},
+		{name: "administrator", status: "administrator"},
+		{name: "creator", status: "creator"},
+		{name: "restricted member", status: "restricted", isMember: true},
+		{name: "restricted nonmember", status: "restricted", showJoin: true},
+		{name: "left", status: "left", showJoin: true},
+		{name: "kicked", status: "kicked", showJoin: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, store, _, tg, p := fixture()
+			store.grants[42] = map[string]domain.Grant{"profile": {UserID: 42, ProfileID: "profile", Active: true}}
+			tg.member = domain.TelegramMember{Status: tc.status, IsMember: tc.isMember}
+			apply(t, s, credential(1, "/start"))
+			if len(tg.memberCalls) != 1 || tg.memberCalls[0] != [2]int64{-100, 42} {
+				t.Fatalf("unexpected membership queries: %v", tg.memberCalls)
+			}
+			if len(p.replies) != 1 {
+				t.Fatalf("unexpected replies: %+v", p.replies)
+			}
+			menu := p.replies[0]
+			if tc.showJoin {
+				if len(menu.Buttons) != 1 || menu.Buttons[0][0].Data != "g:profile:-100" {
+					t.Fatalf("join missing: %+v", menu)
+				}
+			} else if len(menu.Buttons) != 0 || menu.Text != "当前没有待完成的验证或可加入的群组。" {
+				t.Fatalf("joined group still shown: %+v", menu)
+			}
+			if len(store.members) != 0 {
+				t.Fatal("menu lookup persisted membership")
+			}
+		})
+	}
+}
+
+func TestMenuChecksSharedChatOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name, status string
+		err          error
+		wantRows     int
+	}{
+		{name: "already joined", status: "member"},
+		{name: "not joined", status: "left", wantRows: 1},
+		{name: "lookup failed", err: domain.ErrUnavailable, wantRows: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, store, _, tg, p := fixture()
+			profile := store.profiles["profile"]
+			profile.ChatIDs = []int64{-100, -100}
+			store.profiles["profile"] = profile
+			profile.ID, profile.Name = "second", "另一验证"
+			store.profiles[profile.ID] = profile
+			store.grants[42] = map[string]domain.Grant{
+				"profile": {UserID: 42, ProfileID: "profile", Active: true},
+				"second":  {UserID: 42, ProfileID: "second", Active: true},
+			}
+			tg.memberFunc = func(context.Context, string, int64, int64) (domain.TelegramMember, error) {
+				return domain.TelegramMember{Status: tc.status}, tc.err
+			}
+			apply(t, s, credential(1, "/start"))
+			if len(tg.memberCalls) != 1 || len(p.replies) != 1 || len(p.replies[0].Buttons) != tc.wantRows {
+				t.Fatalf("queries=%v replies=%+v", tg.memberCalls, p.replies)
+			}
+		})
+	}
+}
+
+func TestMenuOnlyChecksAuthorizedAvailableChats(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*memoryStore)
+	}{
+		{name: "disabled verification", change: func(store *memoryStore) {
+			profile := store.profiles["profile"]
+			profile.Enabled = false
+			store.profiles[profile.ID] = profile
+		}},
+		{name: "disabled group", change: func(store *memoryStore) {
+			chat := store.chats[-100]
+			chat.Enabled = false
+			store.chats[chat.ID] = chat
+		}},
+		{name: "bot not administrator", change: func(store *memoryStore) {
+			chat := store.chats[-100]
+			chat.BotStatus = "member"
+			store.chats[chat.ID] = chat
+		}},
+		{name: "bot cannot invite", change: func(store *memoryStore) {
+			chat := store.chats[-100]
+			chat.CanInvite = false
+			store.chats[chat.ID] = chat
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, store, _, tg, _ := fixture()
+			store.grants[42] = map[string]domain.Grant{"profile": {UserID: 42, ProfileID: "profile", Active: true}}
+			tc.change(store)
+			apply(t, s, credential(1, "/start"))
+			if len(tg.memberCalls) != 0 {
+				t.Fatalf("unavailable group queried: %v", tg.memberCalls)
+			}
+		})
+	}
+}
+
+func TestMenuRefreshesMembershipForEveryStart(t *testing.T) {
+	s, store, _, tg, p := fixture()
+	store.grants[42] = map[string]domain.Grant{"profile": {UserID: 42, ProfileID: "profile", Active: true}}
+	stored := domain.Member{ChatID: -100, UserID: 42, Status: "member", UpdatedAt: time.Now()}
+	store.members[[2]int64{-100, 42}] = stored
+	tg.member.Status = "member"
+	apply(t, s, credential(1, "/start"))
+	if len(p.replies) != 1 || len(p.replies[0].Buttons) != 0 {
+		t.Fatalf("joined group shown: %+v", p.replies)
+	}
+	tg.member.Status = "left"
+	apply(t, s, credential(2, "/start"))
+	if len(tg.memberCalls) != 2 || len(p.replies) != 2 || len(p.replies[1].Buttons) != 1 || p.replies[1].Buttons[0][0].Data != "g:profile:-100" {
+		t.Fatalf("leaving group did not restore join: queries=%v replies=%+v", tg.memberCalls, p.replies)
+	}
+	if store.members[[2]int64{-100, 42}] != stored {
+		t.Fatal("menu lookup changed stored membership")
+	}
+}
+
+func TestMenuLookupFailureKeepsQualificationAndJoin(t *testing.T) {
+	s, store, v, tg, p := fixture()
+	store.conversations[42] = domain.Conversation{UserID: 42, ProfileID: "profile", ExpiresAt: time.Now().Add(time.Minute)}
+	tg.memberFunc = func(context.Context, string, int64, int64) (domain.TelegramMember, error) {
+		return domain.TelegramMember{}, domain.ErrUnavailable
+	}
+	u := credential(1, "card")
+	apply(t, s, u)
+	apply(t, s, u)
+	if v.calls != 1 || len(tg.memberCalls) != 1 || !store.grants[42]["profile"].Active || len(store.receipts) != 1 {
+		t.Fatalf("lookup failure affected verification: verify=%d queries=%v grants=%v receipts=%v", v.calls, tg.memberCalls, store.grants, store.receipts)
+	}
+	if _, waiting := store.conversations[42]; waiting {
+		t.Fatal("verification conversation was not consumed")
+	}
+	if len(p.replies) != 2 || p.replies[0].Text != "验证通过。" || p.replies[1].Text != "请选择验证方式或加入已授权的群组。" || len(p.replies[1].Buttons) != 1 || p.replies[1].Buttons[0][0].Data != "g:profile:-100" {
+		t.Fatalf("lookup failure hid join or added a notice: %+v", p.replies)
+	}
+}
+
+func TestMenuLookupBudgetDoesNotCancelVerification(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s, store, _, tg, p := fixture()
+		profile := store.profiles["profile"]
+		profile.ChatIDs = []int64{-100, -200, -300}
+		store.profiles[profile.ID] = profile
+		for _, id := range []int64{-200, -300} {
+			chat := store.chats[-100]
+			chat.ID = id
+			store.chats[id] = chat
+		}
+		store.conversations[42] = domain.Conversation{UserID: 42, ProfileID: "profile", ExpiresAt: time.Now().Add(time.Minute)}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		started := time.Now()
+		deadline := started.Add(10 * time.Second)
+		tg.memberFunc = func(queryCtx context.Context, token string, _, userID int64) (domain.TelegramMember, error) {
+			if got, ok := queryCtx.Deadline(); !ok || !got.Equal(deadline) {
+				t.Fatalf("membership queries do not share a 10-second budget: %v %v", got, ok)
+			}
+			if token != store.settings.Token || userID != 42 {
+				t.Fatal("wrong membership query credentials or user")
+			}
+			if len(tg.memberCalls) == 1 {
+				time.Sleep(4 * time.Second)
+				return domain.TelegramMember{Status: "left"}, nil
+			}
+			<-queryCtx.Done()
+			return domain.TelegramMember{}, queryCtx.Err()
+		}
+		if err := s.HandleUpdate(ctx, credential(1, "card")); err != nil {
+			t.Fatal(err)
+		}
+		if time.Since(started) != 10*time.Second || ctx.Err() != nil || len(tg.memberCalls) != 2 {
+			t.Fatalf("budget not enforced or parent canceled: elapsed=%v error=%v queries=%v", time.Since(started), ctx.Err(), tg.memberCalls)
+		}
+		if !store.grants[42]["profile"].Active || len(store.receipts) != 1 || len(p.replies) != 2 || len(p.replies[1].Buttons) != 3 {
+			t.Fatalf("timeout lost qualification or joins: grants=%v receipts=%v replies=%+v", store.grants, store.receipts, p.replies)
+		}
+	})
 }
 
 func TestWelcomePublishFailureDoesNotSkipMenu(t *testing.T) {
