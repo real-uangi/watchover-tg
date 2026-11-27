@@ -5,7 +5,7 @@
 - Go/allingo/Fx 分层单体，仅 auth、bot 两域；domain 不依赖框架，application 通过领域端口访问 IO，infra 实现数据库、加密和外部 HTTP。适配器只调用应用用例。
 - 单实例、单管理员、单 Telegram Bot，仅 Webhook；不要引入多机器人、租户、插件或规则引擎。
 - Webhook 校验 JSON、大小和 secret 后发布到内存入站 eventbus，入队成功即返回 200；后台处理业务事实与完成收据同事务提交。入站事件可在内存包含核验凭据，出站 eventbus 只发送提交后的安全提示；两者均非持久队列，不自动重试。
-- 凭据输入、原始 Update、完整核验请求响应不得落库或日志。Token 不回显。错误必须安全映射，不返回原始网络/数据库错误。
+- 凭据输入、原始 Update、完整核验请求响应不得落库或日志。Bot Token 不回显；管理员显式核验测试可完整展示本次请求响应（含测试凭据和外部接口密钥），仅保留在请求与当前页面内存。错误必须安全映射，不返回原始网络/数据库错误。
 - 管理写操作检查 Origin，采用 Cookie 会话，API no-store；媒体下载必须鉴权代理，文档附件下载并 nosniff。
 - 优先语义导航；无语义工具或非符号检索用限定范围 rg。最小改动、KISS，不添加假设性兜底。
 - 禁止启动 dev server、真实数据库、中间件或真实 Telegram 联调。测试用模拟 RoundTripper、recorder、fake，不监听端口。Fx 仅 ValidateApp。

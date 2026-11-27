@@ -63,6 +63,25 @@ type VerificationResult struct {
 	ExternalID  string `json:"externalId,omitempty"`
 	DisplayName string `json:"displayName,omitempty"`
 }
+type VerificationTestRequest struct {
+	Method  string              `json:"method"`
+	URL     string              `json:"url"`
+	Headers map[string][]string `json:"headers"`
+	Body    string              `json:"body"`
+}
+type VerificationTestResponse struct {
+	StatusCode int                 `json:"statusCode"`
+	Headers    map[string][]string `json:"headers"`
+	Body       string              `json:"body"`
+	Truncated  bool                `json:"truncated"`
+}
+type VerificationTestResult struct {
+	VerificationResult
+	Message    string                    `json:"message"`
+	DurationMS int64                     `json:"durationMs"`
+	Request    VerificationTestRequest   `json:"request"`
+	Response   *VerificationTestResponse `json:"response"`
+}
 type Chat struct {
 	ID          int64  `json:"id"`
 	Type        string `json:"type"`
@@ -235,6 +254,7 @@ type Telegram interface {
 type Verifier interface {
 	Validate(RequestConfig) error
 	Verify(context.Context, RequestConfig, VerificationInput) (VerificationResult, error)
+	Test(context.Context, RequestConfig, VerificationInput) (VerificationTestResult, error)
 }
 type Publisher interface {
 	Publish(Reply) error

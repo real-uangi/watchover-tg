@@ -189,15 +189,50 @@ func (m *memoryStore) Cleanup(_ context.Context, a, b time.Time) error {
 }
 
 type fakeVerifier struct {
-	calls  int
-	result domain.VerificationResult
-	err    error
+	calls       int
+	testCalls   int
+	result      domain.VerificationResult
+	testResult  domain.VerificationTestResult
+	validateErr error
+	err         error
 }
 
-func (*fakeVerifier) Validate(domain.RequestConfig) error { return nil }
+func (v *fakeVerifier) Validate(domain.RequestConfig) error { return v.validateErr }
 func (v *fakeVerifier) Verify(context.Context, domain.RequestConfig, domain.VerificationInput) (domain.VerificationResult, error) {
 	v.calls++
 	return v.result, v.err
+}
+func (v *fakeVerifier) Test(context.Context, domain.RequestConfig, domain.VerificationInput) (domain.VerificationTestResult, error) {
+	v.testCalls++
+	return v.testResult, v.err
+}
+
+func TestProfileReturnsDiagnosticsWithoutStore(t *testing.T) {
+	v := &fakeVerifier{testResult: domain.VerificationTestResult{
+		VerificationResult: domain.VerificationResult{Passed: true, ExternalID: "test-credential", DisplayName: "test-credential"},
+		Message:            "验证通过",
+		Request:            domain.VerificationTestRequest{URL: "https://verify.example/?key=test-credential"},
+	}}
+	s := NewService(nil, nil, v, nil, "https://example.com")
+	result, err := s.TestProfile(context.Background(), domain.Profile{}, domain.VerificationInput{Credential: "test-credential"})
+	if err != nil || !result.Passed || result.ExternalID != "test-credential" || result.DisplayName != "test-credential" || result.Request.URL != v.testResult.Request.URL || v.calls != 0 || v.testCalls != 1 {
+		t.Fatalf("test result=%+v error=%v verify calls=%d test calls=%d", result, err, v.calls, v.testCalls)
+	}
+}
+
+func TestProfileRejectsInvalidInputBeforeRequest(t *testing.T) {
+	v := &fakeVerifier{}
+	s := NewService(nil, nil, v, nil, "https://example.com")
+	if _, err := s.TestProfile(context.Background(), domain.Profile{}, domain.VerificationInput{}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatal("empty credential was accepted", err)
+	}
+	v.validateErr = domain.ErrInvalid
+	if _, err := s.TestProfile(context.Background(), domain.Profile{}, domain.VerificationInput{Credential: "key"}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatal("invalid configuration was accepted", err)
+	}
+	if v.calls != 0 || v.testCalls != 0 {
+		t.Fatal("invalid input reached external verification")
+	}
 }
 
 type fakePublisher struct {
@@ -604,7 +639,10 @@ func TestDifferentBotCannotReuseExistingIdentity(t *testing.T) {
 
 // The authorization mutex also covers admin writes: a revocation must not be
 // overwritten by a verification that was already in flight when it was requested.
-type gatedVerifier struct{ started, release chan struct{} }
+type gatedVerifier struct {
+	domain.Verifier
+	started, release chan struct{}
+}
 
 func (*gatedVerifier) Validate(domain.RequestConfig) error { return nil }
 func (v *gatedVerifier) Verify(ctx context.Context, _ domain.RequestConfig, _ domain.VerificationInput) (domain.VerificationResult, error) {

@@ -5,6 +5,12 @@ export interface Rule { path: string; expected: string | number | boolean | null
 export interface RequestConfig { method: 'GET' | 'POST'; url: string; headers: Record<string, string>; query: Record<string, string>; body?: unknown; rules: Rule[]; identityPath?: string; displayNamePath?: string }
 export interface Profile { id: string; name: string; enabled: boolean; prompt: string; request: RequestConfig; chatIds: number[] }
 export interface VerificationResult { passed: boolean; externalId?: string; displayName?: string }
+export interface VerificationTestResult extends VerificationResult {
+  message: string;
+  durationMs: number;
+  request: { method: string; url: string; headers: Record<string, string[]>; body: string };
+  response: { statusCode: number; headers: Record<string, string[]>; body: string; truncated: boolean } | null;
+}
 export interface Chat { id: number; type: string; title: string; username: string; enabled: boolean; botStatus: string; canInvite: boolean; canRestrict: boolean; canPost: boolean }
 export interface User { id: number; username: string; firstName: string; lastName: string; note: string; privateChat: boolean; updatedAt: string }
 export interface Grant { userId: number; profileId: string; active: boolean; externalId: string; displayName: string; verifiedAt: string }

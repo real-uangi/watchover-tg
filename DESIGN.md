@@ -20,6 +20,8 @@ PostgreSQL持久化单例设置、核验配置与群关联、Telegram用户/群/
 
 每套核验配置含提示、GET/POST URL、headers/query/JSON body、多个JSON Pointer严格标量等值规则（AND）、可选外部ID/展示名路径、关联chatIDs。仅允许http(s)固定scheme/host，用户变量只作用于path/query/header/JSON值；JSON先解析再替换并marshal。变量credential、telegram_user_id、telegram_username；对外HTTP禁redirect、自动重试，错误不可泄露原始URL/请求/响应。
 
+管理员显式测试由TestProfile调用Verifier.Test，与普通Verify共用请求构造和核验逻辑，仅测试路径收集诊断。测试完整返回变量替换后的请求、外部响应、耗时和安全结果说明，可包含测试凭据和外部接口密钥；仅在本次请求及当前页面内存流转，不落库或日志、不授予资格。上游非2xx、网络失败/超时、读取失败、非JSON、规则不符或身份字段解析失败均以HTTP 200返回测试结果，配置无效、管理员认证或Origin错误沿用原状态。单次调用限10秒，响应正文最多1MiB，超限展示截断内容并判为未通过；普通Webhook核验继续使用安全错误映射。后台已有配置默认折叠，新建配置默认展开；折叠保留未保存内容，测试区独立常显并使用当前表单值。
+
 /start分别发送配置的欢迎文案和核验/可加入群菜单，两条回复不保证先后顺序；欢迎为空时只发菜单，核验成功后不再发送欢迎。选择配置进入15分钟等待状态，/cancel取消。凭据只在入站事件和后台处理内存中核验。2xx+合法JSON+全部条件满足才保存grant，业务拒绝与服务故障分开反馈。资格不自动到期。选群在后台处理中同步创建或复用30分钟审批邀请，保存与指定用户、群、配置的映射后才发布提示。chat_join_request重新检查当前资格和映射再approve，错人使用本平台链接则decline，其他管理员邀请不自动处理。
 
 ## Webhook与副作用

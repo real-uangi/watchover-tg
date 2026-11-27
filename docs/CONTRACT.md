@@ -7,7 +7,7 @@ API 返回 `{code:number,message:string,data:...}`；失败 data=null。认证 c
 - POST /api/v1/admin/auth/login `{password}` -> `{authenticated,expiresAt}`；GET /auth/session；POST /auth/logout。
 - GET /api/v1/admin/settings -> Settings；POST /settings/save SaveSettings -> Settings。Token 省略保留。
 - POST /settings/check `{}` -> TelegramUser；GET /webhook/info -> WebhookInfo；POST /webhook/register、/webhook/remove `{}`。
-- GET /profiles/list -> `{items:Profile[]}`；POST /profiles/save Profile -> Profile（新建id空）；POST /profiles/delete `{id}`；POST /profiles/test `{profile:Profile,credential:string,userId:number,username:string}` -> VerificationResult。
+- GET /profiles/list -> `{items:Profile[]}`；POST /profiles/save Profile -> Profile（新建id空）；POST /profiles/delete `{id}`；POST /profiles/test `{profile:Profile,credential:string,userId:number,username:string}` -> VerificationTestResult。
 - GET /chats/list -> `{items:Chat[]}`；POST /chats/add `{id:number}` -> Chat（联网获取信息并检查bot权限）；POST /chats/save `{id,enabled}` -> Chat；POST /chats/check `{id}` -> Chat。
 - GET /chats/members?chatId= -> `{items:Member[]}`；POST /members/action MemberAction -> Member。action=ban|unban|kick|mute|unmute|refresh，untilDate Unix秒，0永久。
 - GET /chats/invites?chatId= -> `{items:Invite[]}`，后台不提供公开分享本应绑定用户的链接动作。
@@ -20,6 +20,10 @@ API 返回 `{code:number,message:string,data:...}`；失败 data=null。认证 c
 
 后端权威定义 internal/bot/domain/bot.go；JSON标签为前后端契约，ID数字 Telegram IDs 用number，数据库int64。Profile.request.body为JSON值（可省略），Rule.expected为JSON标量。GET lists无结果返回items:[]。
 
+VerificationTestResult嵌入VerificationResult（passed、可选externalId/displayName），另含message:string、durationMs:number、request:{method:string,url:string,headers:Record<string,string[]>,body:string}、response:{statusCode:number,headers:Record<string,string[]>,body:string,truncated:boolean}|null。请求为变量替换后的最终内容，未收到响应时response=null。单次外部请求限10秒、不跟随重定向、不自动重试；响应正文最多1MiB，超限保留截断内容并判为未通过。
+
+管理员显式测试使用当前提交的配置，不授予资格；完整请求响应可含测试凭据与外部接口密钥，仅在本次请求与当前页面内存中流转，不落库或日志。上游非2xx、网络失败/超时、读取失败、非JSON、规则不符和身份字段解析失败均为HTTP 200测试结果；配置无效、认证和Origin错误仍走原错误状态。普通Webhook核验继续安全映射错误。
+
 ## 应用Service方法（上下文参数均在首位）
 
 NewService(store domain.Store,tg domain.Telegram,verifier domain.Verifier,publisher domain.Publisher,origin string)*Service
@@ -31,7 +35,7 @@ WebhookInfo(ctx)(WebhookInfo,error)
 Profiles(ctx)([]Profile,error)
 SaveProfile(ctx,Profile)(Profile,error)
 DeleteProfile(ctx,id string)error
-TestProfile(ctx,Profile,VerificationInput)(VerificationResult,error)
+TestProfile(ctx,Profile,VerificationInput)(VerificationTestResult,error)
 Chats(ctx)([]Chat,error)
 AddChat(ctx,id int64)(Chat,error)
 SaveChat(ctx,id int64,enabled bool)(Chat,error)
@@ -54,6 +58,7 @@ Cleanup(ctx)error
 ## infra 构造约定
 
 NewStore(manager *db.Manager,cipher *Cipher)*Store 实现 domain.Store；NewCipher(cfg *config.Config)(*Cipher,error)；NewTelegram() domain.Telegram；NewVerifier() domain.Verifier。
+domain.Verifier提供Validate(RequestConfig)error、Verify(ctx,RequestConfig,VerificationInput)(VerificationResult,error)和Test(ctx,RequestConfig,VerificationInput)(VerificationTestResult,error)；TestProfile校验输入后调用Test，仅Test收集管理员诊断，普通Verify保持原核验及安全错误契约。
 Bootstrap 由infra实现并声明Fx lifecycle：迁移ORM+初始化Settings（欢迎文案、30天、自动生成secret）；DB关闭职责参照posthaste Bootstrap。
 config.Config: Origin string; SecureCookies bool; AdminPassword string; EncryptionKey []byte。
 Publisher由根负责装配，提供PublishUpdate(Update)error和Publish(Reply)error。PublishUpdate向Fx命名updates入站总线发布domain.Update（UpdateTopic=watchover.bot.update）；该总线1个dispatcher、1个executor，两级队列各64。ReceiveUpdate读取设置并校验secret，不获取业务处理锁；入站固定订阅者使用独立Background、60秒context调用HandleUpdate，保留业务锁及业务事实/完成收据同事务提交。

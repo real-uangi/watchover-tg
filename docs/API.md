@@ -7,7 +7,7 @@ API 返回 `{code:number,message:string,data:...}`；失败 data=null。认证 c
 - POST /api/v1/admin/auth/login `{password}` -> `{authenticated,expiresAt}`；GET /auth/session；POST /auth/logout。
 - GET /api/v1/admin/settings -> Settings；POST /settings/save SaveSettings -> Settings。Token 省略保留。
 - POST /settings/check `{}` -> TelegramUser；GET /webhook/info -> WebhookInfo；POST /webhook/register、/webhook/remove `{}`。
-- GET /profiles/list -> `{items:Profile[]}`；POST /profiles/save Profile -> Profile（新建id空）；POST /profiles/delete `{id}`；POST /profiles/test `{profile:Profile,credential:string,userId:number,username:string}` -> VerificationResult。
+- GET /profiles/list -> `{items:Profile[]}`；POST /profiles/save Profile -> Profile（新建id空）；POST /profiles/delete `{id}`；POST /profiles/test `{profile:Profile,credential:string,userId:number,username:string}` -> VerificationTestResult。
 - GET /chats/list -> `{items:Chat[]}`；POST /chats/add `{id:number}` -> Chat（联网获取信息并检查bot权限）；POST /chats/save `{id,enabled}` -> Chat；POST /chats/check `{id}` -> Chat。
 - GET /chats/members?chatId= -> `{items:Member[]}`；POST /members/action MemberAction -> Member。action=ban|unban|kick|mute|unmute|refresh，untilDate Unix秒，0永久。
 - GET /chats/invites?chatId= -> `{items:Invite[]}`，后台不提供公开分享本应绑定用户的链接动作。
@@ -20,10 +20,17 @@ API 返回 `{code:number,message:string,data:...}`；失败 data=null。认证 c
 
 后端权威定义 internal/bot/domain/bot.go；JSON标签为前后端契约，ID数字 Telegram IDs 用number，数据库int64。Profile.request.body为JSON值（可省略），Rule.expected为JSON标量。GET lists无结果返回items:[]。
 
+VerificationTestResult包含`passed:boolean`、可选`externalId:string`与`displayName:string`，以及：
+
+- `message:string`：本次核验结果或失败原因的安全说明；`durationMs:number`：耗时毫秒。
+- `request:{method:string,url:string,headers:Record<string,string[]>,body:string}`：变量替换后的本次请求，正文为文本，头字段保留多值。
+- `response:{statusCode:number,headers:Record<string,string[]>,body:string,truncated:boolean}|null`：已收到的响应；无响应时为null。正文最多1MiB，超限保留截断内容并标记truncated，核验不通过。
+
+测试使用当前提交的配置（可未保存），不授予资格。仅管理员显式测试完整返回请求响应，含测试凭据和外部接口密钥；详情只保留在本次请求与当前页面内存，不写数据库或日志。每次测试仅调用一次外部接口，10秒超时、不跟随重定向、不自动重试。
 
 ## 状态与安全
 
-- 200：应用操作成功；Webhook仅表示Update已进入内存队列，不表示业务已处理或持久化。核验测试是否通过由data.passed决定。
+- 200：应用操作成功；Webhook仅表示Update已进入内存队列，不表示业务已处理或持久化。核验测试是否通过由data.passed决定；上游非2xx、网络失败/超时、正文读取失败、非JSON、规则不符及身份字段解析失败均返回200，具体原因见data.message及请求响应详情。
 - 400：字段或配置错误；401：管理员会话无效；403：来源、Webhook secret或操作权限不满足；404：资源不存在；409：配置/身份冲突。
 - 413：正文或上传超限；415：JSON媒体类型不符；502：外部操作结果未知；503：外部服务或存储不可用；500：未分类内部故障。502可能附带消息记录，调用方不得自动重发。
 - 响应包含code、message、data、time。HTTP状态与code一致。错误不含原始网络URL、Token或数据库消息。

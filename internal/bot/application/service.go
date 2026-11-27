@@ -153,20 +153,14 @@ func (s *Service) DeleteProfile(ctx context.Context, id string) error {
 
 	return s.store.DeleteProfile(ctx, id)
 }
-func (s *Service) TestProfile(ctx context.Context, p domain.Profile, input domain.VerificationInput) (domain.VerificationResult, error) {
+func (s *Service) TestProfile(ctx context.Context, p domain.Profile, input domain.VerificationInput) (domain.VerificationTestResult, error) {
 	if input.Credential == "" {
-		return domain.VerificationResult{}, domain.ErrInvalid
+		return domain.VerificationTestResult{}, domain.ErrInvalid
 	}
 	if err := s.verifier.Validate(p.Request); err != nil {
-		return domain.VerificationResult{}, err
+		return domain.VerificationTestResult{}, err
 	}
-	result, err := s.verifier.Verify(ctx, p.Request, input)
-	if err != nil {
-		return domain.VerificationResult{}, err
-	}
-	result.ExternalID = strings.ReplaceAll(result.ExternalID, input.Credential, "[已隐藏]")
-	result.DisplayName = strings.ReplaceAll(result.DisplayName, input.Credential, "[已隐藏]")
-	return result, nil
+	return s.verifier.Test(ctx, p.Request, input)
 }
 
 func (s *Service) Chats(ctx context.Context) ([]domain.Chat, error) { return s.store.Chats(ctx) }

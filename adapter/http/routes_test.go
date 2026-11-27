@@ -17,6 +17,7 @@ import (
 	authinfra "github.com/real-uangi/watchover-tg/internal/auth/infra"
 	"github.com/real-uangi/watchover-tg/internal/bot/application"
 	"github.com/real-uangi/watchover-tg/internal/bot/domain"
+	botinfra "github.com/real-uangi/watchover-tg/internal/bot/infra"
 	"github.com/real-uangi/watchover-tg/internal/shared/config"
 )
 
@@ -149,5 +150,89 @@ func TestSaveMustExplicitlyProvideEnabled(t *testing.T) {
 	w := perform(engine, "POST", "/api/v1/admin/chats/save", `{"id":-100}`, "https://watch.example", cookie)
 	if w.Code != 400 {
 		t.Fatal(w.Code, w.Body.String())
+	}
+}
+
+type routeProfileVerifier struct {
+	domain.Verifier
+	result domain.VerificationTestResult
+	calls  int
+}
+
+func (v *routeProfileVerifier) Test(context.Context, domain.RequestConfig, domain.VerificationInput) (domain.VerificationTestResult, error) {
+	v.calls++
+	return v.result, nil
+}
+
+func TestProfileDiagnosticsStayInsideAdminBoundary(t *testing.T) {
+	v := &routeProfileVerifier{
+		Verifier: botinfra.NewVerifier(),
+		result: domain.VerificationTestResult{
+			Message:    "外部服务返回 HTTP 403",
+			DurationMS: 12,
+			Request: domain.VerificationTestRequest{
+				Method:  "POST",
+				URL:     "https://verify.example/check?key=test-credential",
+				Headers: map[string][]string{"Authorization": {"Bearer api-key"}},
+				Body:    `{"credential":"test-credential"}`,
+			},
+			Response: &domain.VerificationTestResponse{
+				StatusCode: 403,
+				Headers:    map[string][]string{"Set-Cookie": {"first=1", "second=2"}},
+				Body:       "<html>permission denied</html>",
+			},
+		},
+	}
+	// A nil store ensures testing does not read or write persisted business data.
+	engine := routeEngineWithBot(t, application.NewService(nil, nil, v, nil, "https://watch.example"))
+	cookie := login(t, engine)
+	body := `{"profile":{"request":{"method":"POST","url":"https://verify.example/check","rules":[{"path":"/valid","expected":true}]}},"credential":"test-credential","userId":42}`
+	for _, tc := range []struct {
+		name, body, origin string
+		cookie             *http.Cookie
+		status             int
+	}{
+		{"missing session", body, "https://watch.example", nil, 401},
+		{"wrong origin", body, "https://other.example", cookie, 403},
+		{"invalid config", strings.Replace(body, `"method":"POST"`, `"method":"DELETE"`, 1), "https://watch.example", cookie, 400},
+		{"missing credential", strings.Replace(body, `"credential":"test-credential"`, `"credential":""`, 1), "https://watch.example", cookie, 400},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := perform(engine, "POST", "/api/v1/admin/profiles/test", tc.body, tc.origin, tc.cookie)
+			if w.Code != tc.status || w.Header().Get("Cache-Control") != "no-store" || v.calls != 0 {
+				t.Fatalf("status=%d headers=%v calls=%d", w.Code, w.Header(), v.calls)
+			}
+			var envelope struct {
+				Data any `json:"data"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &envelope); err != nil || envelope.Data != nil {
+				t.Fatal("rejected request exposed diagnostics", err)
+			}
+		})
+	}
+	w := perform(engine, "POST", "/api/v1/admin/profiles/test", body, "https://watch.example", cookie)
+	if w.Code != 200 || w.Header().Get("Cache-Control") != "no-store" || v.calls != 1 {
+		t.Fatal("external failure was not returned as a test result", w.Code, w.Header(), v.calls)
+	}
+	var envelope struct {
+		Code int                           `json:"code"`
+		Data domain.VerificationTestResult `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	result := envelope.Data
+	if envelope.Code != 200 || result.Passed || result.Message != v.result.Message || result.DurationMS != 12 || result.Request.URL != v.result.Request.URL || result.Request.Headers["Authorization"][0] != "Bearer api-key" || result.Request.Body != v.result.Request.Body || result.Response == nil {
+		t.Fatalf("incomplete diagnostics: %+v", result)
+	}
+	if result.Response.StatusCode != 403 || result.Response.Body != v.result.Response.Body || len(result.Response.Headers["Set-Cookie"]) != 2 || result.Response.Truncated {
+		t.Fatalf("incomplete external response: %+v", result.Response)
+	}
+
+	v.result.Response = nil
+	v.result.Message = "外部请求超时"
+	w = perform(engine, "POST", "/api/v1/admin/profiles/test", body, "https://watch.example", cookie)
+	if err := json.Unmarshal(w.Body.Bytes(), &envelope); err != nil || w.Code != 200 || envelope.Data.Response != nil || envelope.Data.Message != v.result.Message || v.calls != 2 {
+		t.Fatal("missing response was not represented as null", err)
 	}
 }

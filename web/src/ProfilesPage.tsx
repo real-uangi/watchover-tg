@@ -2,7 +2,7 @@ import { useState, type FormEvent } from 'react';
 import { post, request } from './api.js';
 import { Badge, Empty, Field, Loading, Notice, Section, useAction, useLoad } from './components.js';
 import { emptyProfile, scalar, stringMap, telegramID } from './forms.js';
-import type { Chat, Profile, VerificationResult } from './types.js';
+import type { Chat, Profile, VerificationTestResult } from './types.js';
 
 export function ProfilesPage() {
   const resource = useLoad(async () => { const [profiles, chats] = await Promise.all([request<{ items: Profile[] }>('/profiles/list'), request<{ items: Chat[] }>('/chats/list')]); return { profiles: profiles.items, chats: chats.items }; }, []);
@@ -19,8 +19,9 @@ export function ProfilesPage() {
   </>;
 }
 
-function ProfileEditor({ initial, chats, onClose, onSaved, onDeleted }: { initial: Profile; chats: Chat[]; onClose: () => void; onSaved: (profile: Profile) => Promise<void>; onDeleted: () => Promise<void> }) {
+export function ProfileEditor({ initial, chats, onClose, onSaved, onDeleted }: { initial: Profile; chats: Chat[]; onClose: () => void; onSaved: (profile: Profile) => Promise<void>; onDeleted: () => Promise<void> }) {
   const [profile, setProfile] = useState(initial);
+  const [configOpen, setConfigOpen] = useState(!initial.id);
   const [headers, setHeaders] = useState(JSON.stringify(initial.request.headers ?? {}, null, 2));
   const [query, setQuery] = useState(JSON.stringify(initial.request.query ?? {}, null, 2));
   const [body, setBody] = useState(initial.request.body === undefined ? '' : JSON.stringify(initial.request.body, null, 2));
@@ -28,13 +29,17 @@ function ProfileEditor({ initial, chats, onClose, onSaved, onDeleted }: { initia
   const [credential, setCredential] = useState('');
   const [testUserID, setTestUserID] = useState('');
   const [testUsername, setTestUsername] = useState('');
-  const [result, setResult] = useState<VerificationResult>();
+  const [result, setResult] = useState<VerificationTestResult>();
   const action = useAction();
+  const testAction = useAction();
+  const busy = action.busy || testAction.busy;
   function value(): Profile {
     return { ...profile, request: { ...profile.request, headers: stringMap(headers, '请求头'), query: stringMap(query, 'Query 参数'), ...(body.trim() ? { body: JSON.parse(body) as unknown } : { body: undefined }), rules: rules.map(rule => ({ path: rule.path, expected: scalar(rule.expected) })) } };
   }
   function submit(event: FormEvent) { event.preventDefault(); void action.run(async () => onSaved(await post<Profile>('/profiles/save', value())), '核验配置已保存。'); }
-  return <Section title={initial.id ? `编辑 · ${initial.name}` : '新建核验配置'} action={<button type="button" onClick={onClose}>收起</button>}>
+  return <Section title={initial.id ? `编辑 · ${initial.name}` : '新建核验配置'} action={<button type="button" onClick={onClose}>关闭面板</button>}>
+    <details className="profile-config" open={configOpen} onToggle={event => setConfigOpen(event.currentTarget.open)}>
+    <summary>配置表单<span>{configOpen ? '收起配置' : '展开配置'}</span></summary>
     <Notice error={action.error} success={action.success} />
     <form onSubmit={submit} className="form-grid">
       <Field label="名称"><input value={profile.name} onChange={e => setProfile({ ...profile, name: e.target.value })} required /></Field>
@@ -51,8 +56,32 @@ function ProfileEditor({ initial, chats, onClose, onSaved, onDeleted }: { initia
       <Field label="外部身份 ID 字段" help="可选，仅用于后台展示。"><input value={profile.request.identityPath || ''} onChange={e => setProfile({ ...profile, request: { ...profile.request, identityPath: e.target.value } })} placeholder="/data/id" /></Field>
       <Field label="显示名称字段" help="可选，不限制业务身份复用。"><input value={profile.request.displayNamePath || ''} onChange={e => setProfile({ ...profile, request: { ...profile.request, displayNamePath: e.target.value } })} placeholder="/data/name" /></Field>
       <fieldset className="col-span-full"><legend>通过后可加入的群组／频道</legend>{chats.length ? <div className="check-grid">{chats.map(chat => <label className="check-item" key={chat.id}><input type="checkbox" checked={profile.chatIds.includes(chat.id)} onChange={e => setProfile({ ...profile, chatIds: e.target.checked ? [...profile.chatIds, chat.id] : profile.chatIds.filter(id => id !== chat.id) })} /><span>{chat.title || chat.id}<small className="mono">{chat.id}{chat.enabled ? '' : ' · 已停用'}</small></span></label>)}</div> : <p className="hint">先到“群组与频道”添加群组。</p>}</fieldset>
-      <div className="form-actions col-span-full"><button className="primary" disabled={action.busy}>保存配置</button>{initial.id && <button type="button" className="danger-quiet" disabled={action.busy} onClick={() => { if (window.confirm(`删除核验配置“${initial.name}”？关联资格和邀请将失去准入效力。`)) void action.run(async () => { await post('/profiles/delete', { id: initial.id }); await onDeleted(); }); }}>删除配置</button>}</div>
+      <div className="form-actions col-span-full"><button className="primary" disabled={busy}>保存配置</button>{initial.id && <button type="button" className="danger-quiet" disabled={busy} onClick={() => { if (window.confirm(`删除核验配置“${initial.name}”？关联资格和邀请将失去准入效力。`)) void action.run(async () => { await post('/profiles/delete', { id: initial.id }); await onDeleted(); }); }}>删除配置</button>}</div>
     </form>
-    <div className="test-area"><h3>测试当前表单</h3><p className="hint">使用未保存的当前配置调用接口；测试凭据不保存，不授予入群资格。</p><div className="form-grid"><Field label="测试凭据"><input type="password" autoComplete="off" value={credential} onChange={e => setCredential(e.target.value)} /></Field><Field label="Telegram 用户 ID"><input inputMode="numeric" value={testUserID} onChange={e => setTestUserID(e.target.value)} placeholder="测试身份的数字 ID" /></Field><Field label="Telegram 用户名 · 可选"><input value={testUsername} onChange={e => setTestUsername(e.target.value)} /></Field><div className="form-actions"><button disabled={action.busy || !credential} onClick={() => void action.run(async () => { setResult(undefined); try { setResult(await post<VerificationResult>('/profiles/test', { profile: value(), credential, userId: telegramID(testUserID), username: testUsername })); } finally { setCredential(''); } })}>{action.busy ? '处理中…' : '执行测试'}</button></div></div>{result && <div className={`notice ${result.passed ? 'success' : ''}`} role="status">{result.passed ? '验证通过' : '验证未通过'}{result.externalId && <span> · 身份 ID：{result.externalId}</span>}{result.displayName && <span> · 名称：{result.displayName}</span>}</div>}</div>
+    </details>
+    <div className="test-area"><h3>测试当前配置</h3><p className="hint">使用未保存的当前配置调用接口；测试凭据不保存，不授予入群资格。</p><div className="form-grid"><Field label="测试凭据"><input type="password" autoComplete="off" value={credential} onChange={e => setCredential(e.target.value)} /></Field><Field label="Telegram 用户 ID"><input inputMode="numeric" value={testUserID} onChange={e => setTestUserID(e.target.value)} placeholder="测试身份的数字 ID" /></Field><Field label="Telegram 用户名 · 可选"><input value={testUsername} onChange={e => setTestUsername(e.target.value)} /></Field><div className="form-actions"><button disabled={busy || !credential} onClick={() => void testAction.run(async () => { setResult(undefined); try { setResult(await post<VerificationTestResult>('/profiles/test', { profile: value(), credential, userId: telegramID(testUserID), username: testUsername })); } finally { setCredential(''); } })}>{testAction.busy ? '处理中…' : '执行测试'}</button></div></div>
+      <Notice error={testAction.error} />
+      {result && <VerificationTestDetails result={result} />}
+    </div>
   </Section>;
+}
+
+function headerLines(headers: Record<string, string[]>) {
+  return Object.entries(headers).flatMap(([name, values]) => values.map(value => `${name}: ${value}`)).join('\n');
+}
+
+export function VerificationTestDetails({ result }: { result: VerificationTestResult }) {
+  return <div className="test-result">
+    <div className={`notice ${result.passed ? 'success' : 'error'}`} role="status">
+      <strong>{result.passed ? '验证通过' : '验证未通过'}</strong><span> · {result.durationMs} ms</span>
+      <p>{result.message}</p>
+      {result.externalId && <span>身份 ID：{result.externalId}</span>}{result.displayName && <span> · 名称：{result.displayName}</span>}
+    </div>
+    <div className="test-exchange">
+      <div><h3>请求信息</h3><pre className="test-payload" tabIndex={0} aria-label="请求信息">{`${result.request.method} ${result.request.url}\n\n${headerLines(result.request.headers)}\n\n${result.request.body}`}</pre></div>
+      <div><h3>响应信息{result.response && <span> · HTTP {result.response.statusCode}</span>}</h3>
+        {result.response ? <><pre className="test-payload" tabIndex={0} aria-label="响应信息">{`HTTP ${result.response.statusCode}\n\n${headerLines(result.response.headers)}\n\n${result.response.body}`}</pre>{result.response.truncated && <p className="hint">响应正文超过 1 MiB，已截断。</p>}</> : <p className="hint">未收到响应。</p>}
+      </div>
+    </div>
+  </div>;
 }

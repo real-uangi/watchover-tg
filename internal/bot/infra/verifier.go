@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -191,6 +193,20 @@ func replaceJSON(v any, r *strings.Replacer) any {
 	return v
 }
 func (v *Verifier) Verify(ctx context.Context, c domain.RequestConfig, input domain.VerificationInput) (domain.VerificationResult, error) {
+	return v.verify(ctx, c, input, nil)
+}
+func (v *Verifier) Test(ctx context.Context, c domain.RequestConfig, input domain.VerificationInput) (domain.VerificationTestResult, error) {
+	started := time.Now()
+	var test domain.VerificationTestResult
+	result, err := v.verify(ctx, c, input, &test)
+	test.VerificationResult = result
+	test.DurationMS = time.Since(started).Milliseconds()
+	if errors.Is(err, domain.ErrUnavailable) {
+		return test, nil
+	}
+	return test, err
+}
+func (v *Verifier) verify(ctx context.Context, c domain.RequestConfig, input domain.VerificationInput, test *domain.VerificationTestResult) (domain.VerificationResult, error) {
 	// Saved profiles and administrator tests are validated at their write boundary.
 	replacer := strings.NewReplacer(variables[0], input.Credential, variables[1], strconv.FormatInt(input.UserID, 10), variables[2], input.Username)
 	u, _ := url.Parse(c.URL)
@@ -214,12 +230,14 @@ func (v *Verifier) Verify(ctx context.Context, c domain.RequestConfig, input dom
 	}
 	u.RawQuery = query.Encode()
 	var body io.Reader
+	var rawBody []byte
 	if len(c.Body) > 0 {
 		value, _ := parseJSON(c.Body)
 		raw, e := json.Marshal(replaceJSON(value, replacer))
 		if e != nil {
 			return domain.VerificationResult{}, domain.ErrInvalid
 		}
+		rawBody = raw
 		body = bytes.NewReader(raw)
 	}
 	req, e := http.NewRequestWithContext(ctx, c.Method, u.String(), body)
@@ -232,26 +250,66 @@ func (v *Verifier) Verify(ctx context.Context, c domain.RequestConfig, input dom
 	for key, value := range c.Headers {
 		req.Header.Set(key, replacer.Replace(value))
 	}
+	if test != nil {
+		test.Request = domain.VerificationTestRequest{Method: req.Method, URL: req.URL.String(), Headers: req.Header.Clone(), Body: string(rawBody)}
+	}
 	response, e := v.client.Do(req)
 	if e != nil {
+		if test != nil {
+			var networkError net.Error
+			switch {
+			case errors.Is(e, context.DeadlineExceeded) || (errors.As(e, &networkError) && networkError.Timeout()):
+				test.Message = "请求外部服务超时"
+			case errors.Is(e, context.Canceled):
+				test.Message = "请求已取消"
+			default:
+				test.Message = "连接外部服务失败"
+			}
+		}
 		return domain.VerificationResult{}, domain.ErrUnavailable
 	}
 	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
+	if test == nil && (response.StatusCode < 200 || response.StatusCode >= 300) {
 		return domain.VerificationResult{}, domain.ErrUnavailable
 	}
 	raw, e := io.ReadAll(io.LimitReader(response.Body, (1<<20)+1))
+	if test != nil {
+		preview := raw
+		if len(preview) > 1<<20 {
+			preview = preview[:1<<20]
+		}
+		test.Response = &domain.VerificationTestResponse{StatusCode: response.StatusCode, Headers: response.Header.Clone(), Body: string(preview), Truncated: len(raw) > 1<<20}
+	}
 	if e != nil || len(raw) > 1<<20 {
+		if test != nil {
+			if e != nil {
+				test.Message = "读取响应正文失败"
+			} else {
+				test.Message = "响应正文超过 1 MiB，已截断"
+			}
+		}
+		return domain.VerificationResult{}, domain.ErrUnavailable
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		if test != nil {
+			test.Message = "外部服务返回 HTTP " + strconv.Itoa(response.StatusCode)
+		}
 		return domain.VerificationResult{}, domain.ErrUnavailable
 	}
 	value, e := parseJSON(raw)
 	if e != nil {
+		if test != nil {
+			test.Message = "响应正文不是有效 JSON"
+		}
 		return domain.VerificationResult{}, domain.ErrUnavailable
 	}
 	for _, rule := range c.Rules {
 		actual, ok := pointer(value, rule.Path)
 		expected, _ := parseJSON(rule.Expected)
 		if !ok || !equalScalar(actual, expected) {
+			if test != nil {
+				test.Message = "未满足通过条件：" + rule.Path
+			}
 			return domain.VerificationResult{Passed: false}, nil
 		}
 	}
@@ -263,6 +321,9 @@ func (v *Verifier) Verify(ctx context.Context, c domain.RequestConfig, input dom
 		if mapping.path != "" {
 			field, ok := pointer(value, mapping.path)
 			if !ok {
+				if test != nil {
+					test.Message = "响应中缺少身份字段：" + mapping.path
+				}
 				return domain.VerificationResult{}, domain.ErrUnavailable
 			}
 			switch x := field.(type) {
@@ -271,9 +332,15 @@ func (v *Verifier) Verify(ctx context.Context, c domain.RequestConfig, input dom
 			case json.Number:
 				*mapping.dest = string(x)
 			default:
+				if test != nil {
+					test.Message = "响应身份字段必须是字符串或数字：" + mapping.path
+				}
 				return domain.VerificationResult{}, domain.ErrUnavailable
 			}
 		}
+	}
+	if test != nil {
+		test.Message = "验证通过"
 	}
 	return result, nil
 }
